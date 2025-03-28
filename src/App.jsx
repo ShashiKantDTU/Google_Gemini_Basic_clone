@@ -4,10 +4,12 @@ import ReactMarkdown from "react-markdown";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
+import OpenAI from "openai";
 
 function App() {
   const Apikey1 = import.meta.env.VITE_API_KEY1
   const Apikey2 = import.meta.env.VITE_API_KEY2
+  const GitHubToken = import.meta.env.VITE_GITHUB_TOKEN
 
   const [currentKey, setCurrentKey] = useState(Apikey1)
   const [response, setResponse] = useState("");
@@ -30,12 +32,16 @@ function App() {
     { id: "gemini-1.5-pro", name: "Gemini 1.5 Pro", description: "Advanced model with vision support and reasoning" },
     { id: "gemini-1.5-flash", name: "Gemini 1.5 Flash", description: "Faster model with both text and vision capabilities" },
     { id: "gemini-2.0-flash", name: "Gemini 2.0 Flash", description: "Latest model with enhanced speed and capabilities" },
-    { id: "gemini-2.0-flash-exp-image-generation", name: "Gemini 2.0 Image Gen", description: "Create AI-generated images from text descriptions" }
+    { id: "gemini-2.0-flash-exp-image-generation", name: "Gemini 2.0 Image Gen", description: "Create AI-generated images from text descriptions" },
+    { id: "gpt-4o", name: "GPT-4o", description: "Latest OpenAI model with powerful multimodal capabilities" }
   ];
 
   // Get current model
   const getCurrentModel = () => {
-    if (isImageGenModel()) {
+    if (isGPT4oModel()) {
+      // Return null for GPT-4o as we'll handle it differently
+      return null;
+    } else if (isImageGenModel()) {
       return new GoogleGenerativeAI(currentKey).getGenerativeModel({ 
         model: selectedModel,
         generationConfig: {
@@ -48,12 +54,17 @@ function App() {
   
   // Check if current model supports vision
   const isVisionModel = () => {
-    return selectedModel === "gemini-1.5-pro" || selectedModel === "gemini-1.5-flash";
+    return selectedModel === "gemini-1.5-pro" || selectedModel === "gemini-1.5-flash" || selectedModel === "gpt-4o";
   };
 
   // Check if current model supports image generation
   const isImageGenModel = () => {
     return selectedModel === "gemini-2.0-flash-exp-image-generation";
+  };
+
+  // Check if current model is GPT-4o
+  const isGPT4oModel = () => {
+    return selectedModel === "gpt-4o";
   };
 
   const handleInput = (e) => {
@@ -130,6 +141,15 @@ function App() {
     };
   };
 
+  // Get image data URL for GPT-4o
+  const getImageDataUrl = async (file) => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result);
+      reader.readAsDataURL(file);
+    });
+  };
+
   const fetchResponse = async () => {
     if (!search.trim() && !selectedImage) {
       alert("Please enter a question or prompt, or upload an image with the vision model");
@@ -142,105 +162,236 @@ function App() {
     setSidebarOpen(false); // Close sidebar when sending message on mobile
     
     try {
-      let userContent = [];
-      
-      // If there's an image and we're using vision model
-      if (selectedImage && isVisionModel()) {
-        const imagePart = await fileToGenerativePart(selectedImage);
-        userContent = [
-          { text: userQuery || "What's in this image?" },
-          imagePart
-        ];
+      // Handle GPT-4o model separately
+      if (isGPT4oModel()) {
+        const endpoint = "https://models.inference.ai.azure.com";
+        const modelName = "gpt-4o";
         
-        // Add user query and image to conversations
-        setConversations(prev => [...prev, { 
-          type: 'user', 
-          content: userQuery || "What's in this image?",
-          image: imagePreview 
-        }]);
-      } else {
-        // Text-only query
-        userContent = userQuery;
+        // Create OpenAI client with GitHub token
+        const client = new OpenAI({ 
+          baseURL: endpoint, 
+          apiKey: GitHubToken,
+          dangerouslyAllowBrowser: true
+        });
         
         // Add user query to conversations
-        setConversations(prev => [...prev, { type: 'user', content: userQuery }]);
-      }
-      
-      // Get appropriate model
-      const model = getCurrentModel();
-      
-      // Handle image generation model - doesn't support streaming
-      if (isImageGenModel()) {
-        // Generate content
-        const result = await model.generateContent(userContent);
-        let textContent = "";
-        let generatedImage = null;
-        
-        // Extract text and image from response
-        for (const part of result.response.candidates[0].content.parts) {
-          if (part.text) {
-            textContent += part.text;
-          } else if (part.inlineData) {
-            generatedImage = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-          }
-        }
-        
-        setResponse(textContent);
-        
-        // Add AI response with both text and generated image
-        setConversations(prev => [...prev, { 
-          type: 'ai', 
-          content: textContent,
-          generatedImage: generatedImage 
-        }]);
-      } else {
-        // For text-based models, use streaming
-        setIsStreaming(true);
-        
-        // Create a placeholder for the streaming response
-        const aiResponseId = Date.now();
-        setConversations(prev => [...prev, { 
-          type: 'ai', 
-          content: '',
-          id: aiResponseId,
-          isStreaming: true
-        }]);
-        
-        // Stream the content
-        let streamedContent = '';
-        const result = await model.generateContentStream(userContent);
-        
-        for await (const chunk of result.stream) {
-          const chunkText = chunk.text();
-          streamedContent += chunkText;
+        if (selectedImage) {
+          setConversations(prev => [...prev, { 
+            type: 'user', 
+            content: userQuery || "What's in this image?",
+            image: imagePreview 
+          }]);
           
-          // Update the streaming response
+          // Create message with image
+          const imageUrl = await getImageDataUrl(selectedImage);
+          
+          // Create placeholder for streaming response
+          const aiResponseId = Date.now();
+          setConversations(prev => [...prev, { 
+            type: 'ai', 
+            content: '',
+            id: aiResponseId,
+            isStreaming: true
+          }]);
+          
+          // Send request to GPT-4o with image
+          const response = await client.chat.completions.create({
+            messages: [
+              { role: "system", content: "You are a helpful assistant that can analyze images and text." },
+              { role: "user", content: [
+                { type: "text", text: userQuery || "What's in this image?" },
+                { type: "image_url", image_url: { url: imageUrl }}
+              ]}
+            ],
+            model: modelName,
+            stream: true
+          });
+          
+          // Process streaming response
+          let streamedContent = '';
+          for await (const chunk of response) {
+            const content = chunk.choices[0]?.delta?.content || '';
+            streamedContent += content;
+            
+            // Update the streaming response
+            setConversations(prev => 
+              prev.map(item => 
+                item.id === aiResponseId 
+                  ? { ...item, content: streamedContent } 
+                  : item
+              )
+            );
+          }
+          
+          // Mark streaming as complete
           setConversations(prev => 
             prev.map(item => 
               item.id === aiResponseId 
-                ? { ...item, content: streamedContent } 
+                ? { ...item, isStreaming: false } 
                 : item
             )
           );
+          
+          setResponse(streamedContent);
+          setIsStreaming(false);
+          
+          // Clear image after sending
+          removeImage();
+        } else {
+          // Text-only query for GPT-4o
+          setConversations(prev => [...prev, { type: 'user', content: userQuery }]);
+          
+          // Create placeholder for streaming response
+          const aiResponseId = Date.now();
+          setConversations(prev => [...prev, { 
+            type: 'ai', 
+            content: '',
+            id: aiResponseId,
+            isStreaming: true
+          }]);
+          
+          setIsStreaming(true);
+          
+          // Stream the GPT-4o text response
+          const response = await client.chat.completions.create({
+            messages: [
+              { role: "system", content: "You are a helpful assistant." },
+              { role: "user", content: userQuery }
+            ],
+            model: modelName,
+            stream: true
+          });
+          
+          // Process streaming response
+          let streamedContent = '';
+          for await (const chunk of response) {
+            const content = chunk.choices[0]?.delta?.content || '';
+            streamedContent += content;
+            
+            // Update the streaming response
+            setConversations(prev => 
+              prev.map(item => 
+                item.id === aiResponseId 
+                  ? { ...item, content: streamedContent } 
+                  : item
+              )
+            );
+          }
+          
+          // Mark streaming as complete
+          setConversations(prev => 
+            prev.map(item => 
+              item.id === aiResponseId 
+                ? { ...item, isStreaming: false } 
+                : item
+            )
+          );
+          
+          setResponse(streamedContent);
+          setIsStreaming(false);
+        }
+      } else {
+        // Original code for Gemini models
+        let userContent = [];
+        
+        // If there's an image and we're using vision model
+        if (selectedImage && isVisionModel()) {
+          const imagePart = await fileToGenerativePart(selectedImage);
+          userContent = [
+            { text: userQuery || "What's in this image?" },
+            imagePart
+          ];
+          
+          // Add user query and image to conversations
+          setConversations(prev => [...prev, { 
+            type: 'user', 
+            content: userQuery || "What's in this image?",
+            image: imagePreview 
+          }]);
+        } else {
+          // Text-only query
+          userContent = userQuery;
+          
+          // Add user query to conversations
+          setConversations(prev => [...prev, { type: 'user', content: userQuery }]);
         }
         
-        // Update the final response
-        setResponse(streamedContent);
+        // Get appropriate model
+        const model = getCurrentModel();
         
-        // Mark streaming as complete
-        setConversations(prev => 
-          prev.map(item => 
-            item.id === aiResponseId 
-              ? { ...item, isStreaming: false } 
-              : item
-          )
-        );
-        setIsStreaming(false);
-      }
-      
-      // Clear image after sending if using vision model
-      if (isVisionModel()) {
-        removeImage();
+        // Handle image generation model - doesn't support streaming
+        if (isImageGenModel()) {
+          // Generate content
+          const result = await model.generateContent(userContent);
+          let textContent = "";
+          let generatedImage = null;
+          
+          // Extract text and image from response
+          for (const part of result.response.candidates[0].content.parts) {
+            if (part.text) {
+              textContent += part.text;
+            } else if (part.inlineData) {
+              generatedImage = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+            }
+          }
+          
+          setResponse(textContent);
+          
+          // Add AI response with both text and generated image
+          setConversations(prev => [...prev, { 
+            type: 'ai', 
+            content: textContent,
+            generatedImage: generatedImage 
+          }]);
+        } else {
+          // For text-based models, use streaming
+          setIsStreaming(true);
+          
+          // Create a placeholder for the streaming response
+          const aiResponseId = Date.now();
+          setConversations(prev => [...prev, { 
+            type: 'ai', 
+            content: '',
+            id: aiResponseId,
+            isStreaming: true
+          }]);
+          
+          // Stream the content
+          let streamedContent = '';
+          const result = await model.generateContentStream(userContent);
+          
+          for await (const chunk of result.stream) {
+            const chunkText = chunk.text();
+            streamedContent += chunkText;
+            
+            // Update the streaming response
+            setConversations(prev => 
+              prev.map(item => 
+                item.id === aiResponseId 
+                  ? { ...item, content: streamedContent } 
+                  : item
+              )
+            );
+          }
+          
+          // Update the final response
+          setResponse(streamedContent);
+          
+          // Mark streaming as complete
+          setConversations(prev => 
+            prev.map(item => 
+              item.id === aiResponseId 
+                ? { ...item, isStreaming: false } 
+                : item
+            )
+          );
+          setIsStreaming(false);
+        }
+        
+        // Clear image after sending if using vision model
+        if (isVisionModel()) {
+          removeImage();
+        }
       }
       
     } catch (error) {
